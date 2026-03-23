@@ -82,7 +82,8 @@ with col1:
 with col2:
     st.metric("Total unique devices", total_ever, help="All devices ever seen")
 with col3:
-    last_scan = data.get("scan_log", [{}])[-1]
+    scan_log_list = data.get("scan_log", [])
+    last_scan = scan_log_list[-1] if scan_log_list else {}
     last_ts = last_scan.get("timestamp", 0)
     st.metric("Last scan", datetime.fromtimestamp(last_ts).strftime("%H:%M:%S") if last_ts else "—")
 with col4:
