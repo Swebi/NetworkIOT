@@ -13,7 +13,7 @@ import pandas as pd
 import sys
 sys.path.insert(0, str(Path(__file__).parent))
 
-from ble_scanner import load_data, get_active_count, start_scanner_background, BLEAK_AVAILABLE, OCCUPANCY_WINDOW
+from ble_scanner import load_data, get_active_count, start_scanner_background, BLEAK_AVAILABLE, OCCUPANCY_WINDOW, SCANNER_ERROR
 
 # Page config
 st.set_page_config(
@@ -57,8 +57,11 @@ with st.sidebar:
     if not BLEAK_AVAILABLE:
         st.error("⚠️ bleak not installed")
         st.code("pip install bleak", language="bash")
+    elif SCANNER_ERROR:
+        st.warning(f"⚠️ {SCANNER_ERROR}")
+        st.caption("Run `sudo bluetoothctl power on` to fix this.")
     else:
-        st.success("Scanner running")
+        st.success("✅ Scanner running")
 
     st.divider()
     if st.button("🔄 Refresh"):

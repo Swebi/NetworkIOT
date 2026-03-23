@@ -9,10 +9,14 @@ import time
 from pathlib import Path
 
 try:
-    from bleak import BleakScanner
+    from bleak import BleakScanner, BleakError
     BLEAK_AVAILABLE = True
 except ImportError:
+    BleakError = Exception  # fallback so except clauses still parse
     BLEAK_AVAILABLE = False
+
+# Last scanner error exposed for the dashboard to display
+SCANNER_ERROR: str = ""
 
 # Config
 DATA_FILE = Path(__file__).parent / "occupancy_data.json"
@@ -60,14 +64,20 @@ async def run_scan() -> dict:
 
 def scanner_loop():
     """Background loop that scans for BLE devices and updates occupancy data."""
+    global SCANNER_ERROR
     if not BLEAK_AVAILABLE:
         print("bleak not installed - run: pip install bleak")
+        SCANNER_ERROR = "bleak not installed. Run: pip install bleak"
         return
+
+    retry_delay = SCAN_INTERVAL  # starts at 5 s, backs off up to 60 s
 
     while True:
         try:
             devices = asyncio.run(run_scan())
             now = time.time()
+            SCANNER_ERROR = ""       # clear any previous error on success
+            retry_delay = SCAN_INTERVAL
 
             data = load_data()
             for mac, info in devices.items():
@@ -91,9 +101,20 @@ def scanner_loop():
             data["scan_log"] = (data.get("scan_log", []) + [{"timestamp": now, "found": len(devices), "active": active}])[-10:]
 
             save_data(data)
+            time.sleep(SCAN_INTERVAL)
+
+        except BleakError as e:
+            # Bluetooth adapter unavailable (off, missing, etc.)
+            SCANNER_ERROR = str(e.args[0]) if e.args else str(e)
+            print(f"Bluetooth error: {SCANNER_ERROR}")
+            retry_delay = min(retry_delay * 2, 60)
+            time.sleep(retry_delay)
+
         except Exception as e:
+            SCANNER_ERROR = str(e)
             print(f"Scan error: {e}")
-        time.sleep(SCAN_INTERVAL)
+            retry_delay = min(retry_delay * 2, 60)
+            time.sleep(retry_delay)
 
 
 def start_scanner_background():
