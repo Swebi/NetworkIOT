@@ -1,6 +1,8 @@
 """
 BLE Scanner for Raspberry Pi - detects unique MAC addresses for occupancy counting.
-Uses bleak for cross-platform BLE scanning. Devices emit BLE advertisements periodically.
+Uses bleak with a persistent BleakScanner + callback to avoid the BlueZ
+"adapter busy" bug that occurs when asyncio event-loops are repeatedly
+created and torn down via asyncio.run().
 """
 import asyncio
 import json
@@ -20,8 +22,9 @@ SCANNER_ERROR: str = ""
 
 # Config
 DATA_FILE = Path(__file__).parent / "occupancy_data.json"
-SCAN_INTERVAL = 5  # seconds between scans
-OCCUPANCY_WINDOW = 900  # 15 minutes - device "present" if seen in last 15 min
+SCAN_DURATION = 5          # seconds each scan window lasts
+SCAN_PAUSE = 2             # seconds between scan windows
+OCCUPANCY_WINDOW = 900     # 15 minutes - device "present" if seen in last 15 min
 
 
 def load_data() -> dict:
@@ -33,9 +36,9 @@ def load_data() -> dict:
         except (json.JSONDecodeError, IOError):
             pass
     return {
-        "devices": {},  # mac -> {"first_seen": ts, "last_seen": ts}
-        "history": [],  # {"timestamp": ts, "count": n} for charts
-        "scan_log": []  # recent scans for debugging
+        "devices": {},   # mac -> {"first_seen": ts, "last_seen": ts, "name": str}
+        "history": [],   # {"timestamp": ts, "count": n} for charts
+        "scan_log": []   # recent scans for debugging
     }
 
 
@@ -54,67 +57,120 @@ def get_active_count(data: dict) -> int:
     )
 
 
-async def run_scan() -> dict:
-    """Run a single BLE scan and return discovered devices."""
-    if not BLEAK_AVAILABLE:
-        return {}
-    devices = await BleakScanner.discover(timeout=SCAN_INTERVAL)
-    return {d.address: {"name": d.name or "Unknown", "rssi": getattr(d, "rssi", None)} for d in devices}
+def _process_scan_results(discovered: dict) -> None:
+    """Merge a batch of discovered devices into the persisted data."""
+    now = time.time()
+    data = load_data()
+
+    for mac, info in discovered.items():
+        if mac not in data["devices"]:
+            data["devices"][mac] = {
+                "first_seen": now,
+                "last_seen": now,
+                "name": info["name"],
+            }
+        else:
+            data["devices"][mac]["last_seen"] = now
+            if info["name"] and info["name"] != "Unknown":
+                data["devices"][mac]["name"] = info["name"]
+
+    # Prune very old devices (not seen in 24 h)
+    day_ago = now - 86400
+    data["devices"] = {
+        k: v for k, v in data["devices"].items() if v["last_seen"] > day_ago
+    }
+
+    # Record history point (keep last 100)
+    active = get_active_count(data)
+    data["history"].append({"timestamp": now, "count": active})
+    data["history"] = data["history"][-100:]
+
+    # Log last scan
+    data["scan_log"] = (
+        data.get("scan_log", [])
+        + [{"timestamp": now, "found": len(discovered), "active": active}]
+    )[-10:]
+
+    save_data(data)
+    print(
+        f"[BLE] Scan complete: {len(discovered)} found, {active} active in window",
+        flush=True,
+    )
 
 
-def scanner_loop():
-    """Background loop that scans for BLE devices and updates occupancy data."""
+async def _scan_loop_async() -> None:
+    """
+    Long-running async loop that keeps a *single* BleakScanner alive.
+    Each cycle: start scanning → collect for SCAN_DURATION → stop → process.
+    Re-using the same scanner & event loop avoids the BlueZ D-Bus "busy" issue.
+    """
     global SCANNER_ERROR
-    if not BLEAK_AVAILABLE:
-        print("bleak not installed - run: pip install bleak")
-        SCANNER_ERROR = "bleak not installed. Run: pip install bleak"
-        return
 
-    retry_delay = SCAN_INTERVAL  # starts at 5 s, backs off up to 60 s
+    retry_delay = SCAN_DURATION
 
     while True:
+        discovered: dict[str, dict] = {}
+
+        def _detection_callback(device, advertisement_data):
+            """Called for every BLE advertisement received."""
+            discovered[device.address] = {
+                "name": device.name or advertisement_data.local_name or "Unknown",
+                "rssi": advertisement_data.rssi,
+            }
+
+        scanner = BleakScanner(detection_callback=_detection_callback)
+
         try:
-            devices = asyncio.run(run_scan())
-            now = time.time()
-            SCANNER_ERROR = ""       # clear any previous error on success
-            retry_delay = SCAN_INTERVAL
+            await scanner.start()
+            await asyncio.sleep(SCAN_DURATION)
+            await scanner.stop()
 
-            data = load_data()
-            for mac, info in devices.items():
-                if mac not in data["devices"]:
-                    data["devices"][mac] = {"first_seen": now, "last_seen": now, "name": info["name"]}
-                else:
-                    data["devices"][mac]["last_seen"] = now
-                    if info["name"] and info["name"] != "Unknown":
-                        data["devices"][mac]["name"] = info["name"]
+            SCANNER_ERROR = ""
+            retry_delay = SCAN_DURATION
 
-            # Prune very old devices (not seen in 24h)
-            day_ago = now - 86400
-            data["devices"] = {k: v for k, v in data["devices"].items() if v["last_seen"] > day_ago}
-
-            # Record history point (keep last 100)
-            active = get_active_count(data)
-            data["history"].append({"timestamp": now, "count": active})
-            data["history"] = data["history"][-100:]
-
-            # Log last scan
-            data["scan_log"] = (data.get("scan_log", []) + [{"timestamp": now, "found": len(devices), "active": active}])[-10:]
-
-            save_data(data)
-            time.sleep(SCAN_INTERVAL)
+            _process_scan_results(discovered)
 
         except BleakError as e:
-            # Bluetooth adapter unavailable (off, missing, etc.)
             SCANNER_ERROR = str(e.args[0]) if e.args else str(e)
-            print(f"Bluetooth error: {SCANNER_ERROR}")
+            print(f"[BLE] Bluetooth error: {SCANNER_ERROR}", flush=True)
             retry_delay = min(retry_delay * 2, 60)
-            time.sleep(retry_delay)
+            try:
+                await scanner.stop()
+            except Exception:
+                pass
 
         except Exception as e:
             SCANNER_ERROR = str(e)
-            print(f"Scan error: {e}")
+            print(f"[BLE] Scan error: {e}", flush=True)
             retry_delay = min(retry_delay * 2, 60)
-            time.sleep(retry_delay)
+            try:
+                await scanner.stop()
+            except Exception:
+                pass
+
+        await asyncio.sleep(SCAN_PAUSE if not SCANNER_ERROR else retry_delay)
+
+
+def scanner_loop() -> None:
+    """
+    Entry point for the background thread.
+    Creates ONE event loop and runs the async scan loop inside it forever.
+    """
+    global SCANNER_ERROR
+    if not BLEAK_AVAILABLE:
+        print("bleak not installed – run: pip install bleak")
+        SCANNER_ERROR = "bleak not installed. Run: pip install bleak"
+        return
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(_scan_loop_async())
+    except Exception as e:
+        SCANNER_ERROR = str(e)
+        print(f"[BLE] Fatal scanner error: {e}", flush=True)
+    finally:
+        loop.close()
 
 
 def start_scanner_background():
