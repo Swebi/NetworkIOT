@@ -1,39 +1,29 @@
-// API layer - swap USE_MOCK to false when backend is ready
-import * as mockApi from "./mockApi";
+const BASE = import.meta.env.VITE_API_URL ?? "http://192.168.42.65:8000";
 
-const USE_MOCK = true;
+async function get(path) {
+  const res = await fetch(`${BASE}${path}`);
+  if (!res.ok) throw new Error(`${res.status} ${path}`);
+  return res.json();
+}
 
-export const getLiveData = () =>
-  USE_MOCK
-    ? Promise.resolve(mockApi.getLiveData())
-    : fetch("/api/live").then((r) => r.json());
+async function post(path, body) {
+  const res = await fetch(`${BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`${res.status} ${path}`);
+  return res.json();
+}
 
-export const getPeakHours = () =>
-  USE_MOCK
-    ? Promise.resolve(mockApi.getPeakHours())
-    : fetch("/api/historical/peak-hours").then((r) => r.json());
+/** Current occupancy, device list, history, recent scans */
+export const getLiveData = () => get("/api/live");
 
-export const getWeeklyPatterns = () =>
-  USE_MOCK
-    ? Promise.resolve(mockApi.getWeeklyPatterns())
-    : fetch("/api/historical/weekly").then((r) => r.json());
+/** Scanner status, window sizes */
+export const getStatus = () => get("/api/status");
 
-export const getUnderusedSpaces = () =>
-  USE_MOCK
-    ? Promise.resolve(mockApi.getUnderusedSpaces())
-    : fetch("/api/historical/underused").then((r) => r.json());
+/** RSSI threshold setting */
+export const getSettings = () => get("/api/settings");
 
-export const getPredictions = () =>
-  USE_MOCK
-    ? Promise.resolve(mockApi.getPredictions())
-    : fetch("/api/predictions").then((r) => r.json());
-
-export const getOvercrowdingAlerts = () =>
-  USE_MOCK
-    ? Promise.resolve(mockApi.getOvercrowdingAlerts())
-    : fetch("/api/alerts").then((r) => r.json());
-
-export const getSystemStatus = () =>
-  USE_MOCK
-    ? Promise.resolve(mockApi.getSystemStatus())
-    : fetch("/api/status").then((r) => r.json());
+/** Save RSSI threshold: { rssi_threshold: number } */
+export const updateSettings = (body) => post("/api/settings", body);

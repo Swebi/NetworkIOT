@@ -1,8 +1,8 @@
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { Layout } from "@/components/layout/Layout";
 import { LiveDataView } from "@/components/live/LiveDataView";
-import { HistoricalView } from "@/components/historical/HistoricalView";
-import { PredictionsView } from "@/components/predictions/PredictionsView";
+import { ZonesView } from "@/components/zones/ZonesView";
+import { SettingsView } from "@/components/settings/SettingsView";
 
 function App() {
   return (
@@ -10,8 +10,8 @@ function App() {
       <Routes>
         <Route path="/" element={<Layout />}>
           <Route index element={<LiveDataView />} />
-          <Route path="historical" element={<HistoricalView />} />
-          <Route path="predictions" element={<PredictionsView />} />
+          <Route path="zones" element={<ZonesView />} />
+          <Route path="settings" element={<SettingsView />} />
         </Route>
       </Routes>
     </BrowserRouter>
