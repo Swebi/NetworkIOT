@@ -23,16 +23,10 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Custom CSS for a cleaner look
+# Custom CSS — uses theme-aware CSS variables for dark/light compatibility
 st.markdown("""
 <style>
-    .big-metric {
-        font-size: 3rem;
-        font-weight: 700;
-        color: #1f77b4;
-    }
-    .stMetric {
-        background: #f8f9fa;
+    [data-testid="stMetric"] {
         padding: 1rem;
         border-radius: 8px;
         border-left: 4px solid #1f77b4;
@@ -64,10 +58,22 @@ with st.sidebar:
         st.success("✅ Scanner running")
 
     st.divider()
+
+    rssi_threshold = st.slider(
+        "RSSI filter (range)",
+        min_value=-100,
+        max_value=-30,
+        value=-100,
+        step=5,
+        help="Only count devices stronger than this. -50 ≈ 1m, -65 ≈ 3-5m, -80 ≈ 10m",
+    )
+
+    st.divider()
     if st.button("🔄 Refresh"):
         st.rerun()
 
-    st.caption(f"Occupancy window: {ble_scanner.OCCUPANCY_WINDOW // 60} min")
+    st.caption(f"Stable MAC window: {ble_scanner.OCCUPANCY_WINDOW // 60} min")
+    st.caption(f"Random MAC window: {ble_scanner.RANDOM_MAC_WINDOW // 60} min")
 
 # Main content
 st.title("Occupancy Dashboard")
@@ -75,15 +81,17 @@ st.caption("Unique BLE devices detected (phones, wearables, etc.)")
 
 # Load data
 data = ble_scanner.load_data()
-active = ble_scanner.get_active_count(data)
-total_ever = len(data["devices"])
+active = ble_scanner.get_active_count(data, rssi_min=rssi_threshold)
+total_tracked = len(data["devices"])
+random_count = sum(1 for d in data["devices"].values() if d.get("random_mac"))
+stable_count = total_tracked - random_count
 
 # KPI row
 col1, col2, col3, col4 = st.columns(4)
 with col1:
-    st.metric("Current Occupancy", active, help="Devices seen in the last 15 min")
+    st.metric("Current Occupancy", active, help="Devices currently present (random MACs expire after 2 min)")
 with col2:
-    st.metric("Total Unique Devices", total_ever, help="All devices ever seen (last 24 h)")
+    st.metric("Tracked Devices", total_tracked, help=f"{stable_count} stable + {random_count} random MAC")
 with col3:
     scan_log_list = data.get("scan_log", [])
     last_scan = scan_log_list[-1] if scan_log_list else {}
@@ -131,14 +139,23 @@ st.subheader("Detected Devices")
 devices = data.get("devices", {})
 if devices:
     rows = []
+    now = time.time()
     for mac, info in sorted(devices.items(), key=lambda x: -x[1]["last_seen"]):
         last = info["last_seen"]
-        is_active = (time.time() - last) < ble_scanner.OCCUPANCY_WINDOW
+        rssi = info.get("rssi") or -100
+        random = info.get("random_mac", False)
+        window = ble_scanner.RANDOM_MAC_WINDOW if random else ble_scanner.OCCUPANCY_WINDOW
+        in_window = (now - last) < window
+        in_range = rssi >= rssi_threshold
+        is_active = in_window and in_range
         rows.append({
             "MAC Address": mac,
             "Name": info.get("name", "—"),
+            "RSSI": rssi,
+            "Type": "Random" if random else "Stable",
+            "Missed": info.get("miss_count", 0),
             "Last Seen": datetime.fromtimestamp(last).strftime("%Y-%m-%d %H:%M:%S"),
-            "Status": "🟢 Active" if is_active else "⚪ Inactive",
+            "Status": "🟢 Active" if is_active else ("📡 Out of range" if in_window and not in_range else "⚪ Inactive"),
         })
     st.dataframe(pd.DataFrame(rows), hide_index=True)
 else:

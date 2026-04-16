@@ -3,6 +3,10 @@ BLE Scanner for Raspberry Pi - detects unique MAC addresses for occupancy counti
 Uses bleak with a persistent BleakScanner + callback to avoid the BlueZ
 "adapter busy" bug that occurs when asyncio event-loops are repeatedly
 created and torn down via asyncio.run().
+
+Handles MAC address randomisation by detecting locally-administered addresses
+and expiring them faster.  Tracks consecutive missed scans so devices that
+leave the area are removed promptly.
 """
 import asyncio
 import json
@@ -24,7 +28,66 @@ SCANNER_ERROR: str = ""
 DATA_FILE = Path(__file__).parent / "occupancy_data.json"
 SCAN_DURATION = 5          # seconds each scan window lasts
 SCAN_PAUSE = 2             # seconds between scan windows
-OCCUPANCY_WINDOW = 900     # 15 minutes - device "present" if seen in last 15 min
+OCCUPANCY_WINDOW = 900     # 15 min - stable-MAC device "present" threshold
+RANDOM_MAC_WINDOW = 120    # 2 min - random-MAC devices expire much faster
+MAX_MISSED_SCANS = 5       # remove device after this many consecutive misses
+MAX_MISSED_RANDOM = 2      # stricter limit for random-MAC devices
+RSSI_THRESHOLD = -100      # only count devices with RSSI above this (less negative = closer)
+
+
+# Common BLE manufacturer IDs → friendly names
+_MANUFACTURER_NAMES = {
+    0x004C: "Apple",
+    0x0006: "Microsoft",
+    0x0075: "Samsung",
+    0x00E0: "Google",
+    0x0059: "Nordic Semi",
+    0x000D: "Texas Instruments",
+    0x0131: "Huawei",
+    0x038F: "Xiaomi",
+    0x0087: "Garmin",
+    0x0157: "Fitbit",
+    0x012D: "Sony",
+    0x0002: "Intel",
+    0x000F: "Broadcom",
+    0x0310: "Qualcomm",
+}
+
+
+def _identify_device(device, adv_data) -> str:
+    """Best-effort device identification from advertisement data."""
+    # Prefer explicit name
+    name = device.name or adv_data.local_name
+    if name:
+        return name
+
+    # Fall back to manufacturer ID
+    if adv_data.manufacturer_data:
+        for company_id in adv_data.manufacturer_data:
+            if company_id in _MANUFACTURER_NAMES:
+                return _MANUFACTURER_NAMES[company_id]
+        # Unknown manufacturer — return the hex ID for debugging
+        first_id = next(iter(adv_data.manufacturer_data))
+        return f"Manufacturer 0x{first_id:04X}"
+
+    # Check service UUIDs for hints
+    if adv_data.service_uuids:
+        return "BLE Peripheral"
+
+    return "Unknown"
+
+
+def is_random_mac(mac: str) -> bool:
+    """Check if a MAC address is locally administered (randomised).
+
+    The second hex digit's bit-1 being set marks a locally-administered
+    address, which is the pattern iOS/Android use for BLE privacy.
+    """
+    try:
+        second_char = mac.replace("-", ":").split(":")[0][1]
+        return int(second_char, 16) & 0x2 != 0
+    except (IndexError, ValueError):
+        return False
 
 
 def load_data() -> dict:
@@ -48,13 +111,22 @@ def save_data(data: dict) -> None:
         json.dump(data, f, indent=2)
 
 
-def get_active_count(data: dict) -> int:
-    """Count devices seen in the occupancy window."""
+def get_active_count(data: dict, rssi_min: int | None = None) -> int:
+    """Count devices seen within their applicable occupancy window.
+
+    Args:
+        rssi_min: If set, only count devices with RSSI >= this value.
+                  Falls back to the global RSSI_THRESHOLD.
+    """
     now = time.time()
-    return sum(
-        1 for d in data["devices"].values()
-        if (now - d["last_seen"]) < OCCUPANCY_WINDOW
-    )
+    threshold = rssi_min if rssi_min is not None else RSSI_THRESHOLD
+    count = 0
+    for d in data["devices"].values():
+        window = RANDOM_MAC_WINDOW if d.get("random_mac") else OCCUPANCY_WINDOW
+        rssi = d.get("rssi") or -100
+        if (now - d["last_seen"]) < window and rssi >= threshold:
+            count += 1
+    return count
 
 
 def _process_scan_results(discovered: dict) -> None:
@@ -62,19 +134,40 @@ def _process_scan_results(discovered: dict) -> None:
     now = time.time()
     data = load_data()
 
+    # Increment miss_count for every existing device not seen in this scan
+    for mac, dev in data["devices"].items():
+        if mac not in discovered:
+            dev["miss_count"] = dev.get("miss_count", 0) + 1
+
+    # Merge discovered devices
     for mac, info in discovered.items():
+        random = is_random_mac(mac)
         if mac not in data["devices"]:
             data["devices"][mac] = {
                 "first_seen": now,
                 "last_seen": now,
                 "name": info["name"],
+                "rssi": info["rssi"],
+                "random_mac": random,
+                "miss_count": 0,
             }
         else:
             data["devices"][mac]["last_seen"] = now
+            data["devices"][mac]["rssi"] = info["rssi"]
+            data["devices"][mac]["miss_count"] = 0
             if info["name"] and info["name"] != "Unknown":
                 data["devices"][mac]["name"] = info["name"]
 
-    # Prune very old devices (not seen in 24 h)
+    # Prune devices that have missed too many consecutive scans
+    pruned: dict = {}
+    for mac, dev in data["devices"].items():
+        miss = dev.get("miss_count", 0)
+        limit = MAX_MISSED_RANDOM if dev.get("random_mac") else MAX_MISSED_SCANS
+        if miss < limit:
+            pruned[mac] = dev
+    data["devices"] = pruned
+
+    # Also prune anything older than 24 h as a safety net
     day_ago = now - 86400
     data["devices"] = {
         k: v for k, v in data["devices"].items() if v["last_seen"] > day_ago
@@ -93,7 +186,8 @@ def _process_scan_results(discovered: dict) -> None:
 
     save_data(data)
     print(
-        f"[BLE] Scan complete: {len(discovered)} found, {active} active in window",
+        f"[BLE] Scan complete: {len(discovered)} found, {active} active "
+        f"({len(data['devices'])} tracked)",
         flush=True,
     )
 
@@ -114,7 +208,7 @@ async def _scan_loop_async() -> None:
         def _detection_callback(device, advertisement_data):
             """Called for every BLE advertisement received."""
             discovered[device.address] = {
-                "name": device.name or advertisement_data.local_name or "Unknown",
+                "name": _identify_device(device, advertisement_data),
                 "rssi": advertisement_data.rssi,
             }
 
