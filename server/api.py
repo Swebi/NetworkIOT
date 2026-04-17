@@ -3,6 +3,7 @@ FastAPI server for BLE occupancy monitoring.
 Run on the Pi with: uvicorn api:app --host 0.0.0.0 --port 8000
 """
 import json
+import socket
 import time
 from datetime import datetime
 from pathlib import Path
@@ -40,6 +41,15 @@ def save_settings(s: dict):
     SETTINGS_FILE.write_text(json.dumps(s, indent=2))
 
 
+def get_local_ip() -> str:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except Exception:
+        return "unknown"
+
+
 # Start scanner once at import time
 if ble_scanner.BLEAK_AVAILABLE:
     ble_scanner.start_scanner_background()
@@ -52,6 +62,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+async def on_startup():
+    ip = get_local_ip()
+    print(f"\n  API URL: http://{ip}:8000\n  Set in client: VITE_API_URL=http://{ip}:8000\n")
 
 
 @app.get("/api/status")
