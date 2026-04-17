@@ -84,16 +84,15 @@ def save_scanner_data(scanner_id: str, data: dict):
 
 def send_ntfy_alert(topic: str, zone_name: str, count: int, threshold: int):
     try:
-        payload = json.dumps({
-            "title": f"Zone alert: {zone_name}",
-            "message": f"Occupancy is {count} — threshold is {threshold}.",
-            "priority": "high",
-            "tags": ["warning"],
-        }).encode()
+        message = f"Occupancy is {count} - threshold is {threshold}.".encode()
         req = urllib.request.Request(
             f"https://ntfy.sh/{topic}",
-            data=payload,
-            headers={"Content-Type": "application/json"},
+            data=message,
+            headers={
+                "Title": f"Zone alert: {zone_name}",
+                "Priority": "high",
+                "Tags": "warning",
+            },
             method="POST",
         )
         urllib.request.urlopen(req, timeout=5)
