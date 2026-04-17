@@ -34,6 +34,12 @@ MAX_MISSED_SCANS = 5       # remove device after this many consecutive misses
 MAX_MISSED_RANDOM = 2      # stricter limit for random-MAC devices
 RSSI_THRESHOLD = -100      # only count devices with RSSI above this (less negative = closer)
 
+_scan_callbacks: list = []
+
+def register_scan_callback(fn) -> None:
+    """Register a function called with (active_count) after each scan completes."""
+    _scan_callbacks.append(fn)
+
 
 # Common BLE manufacturer IDs → friendly names
 _MANUFACTURER_NAMES = {
@@ -190,6 +196,11 @@ def _process_scan_results(discovered: dict) -> None:
         f"({len(data['devices'])} tracked)",
         flush=True,
     )
+    for cb in _scan_callbacks:
+        try:
+            cb(active)
+        except Exception as e:
+            print(f"[BLE] Scan callback error: {e}", flush=True)
 
 
 async def _scan_loop_async() -> None:

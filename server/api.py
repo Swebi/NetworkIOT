@@ -5,8 +5,10 @@ Run on the Pi with: uvicorn api:app --host 0.0.0.0 --port 8000
 import json
 import socket
 import time
+import urllib.request
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,6 +21,9 @@ import ble_scanner
 
 SETTINGS_FILE = Path(__file__).parent / "settings.json"
 ZONES_FILE = Path(__file__).parent / "zones.json"
+
+# Per-zone alert cooldown tracking (zone_id -> last_alert_timestamp)
+_alert_cooldowns: dict[str, float] = {}
 
 
 def load_zones_data() -> dict:
@@ -34,7 +39,12 @@ def save_zones_data(data: dict):
 def load_settings() -> dict:
     if SETTINGS_FILE.exists():
         return json.loads(SETTINGS_FILE.read_text())
-    return {"rssi_threshold": -100}
+    return {
+        "rssi_threshold": -100,
+        "ntfy_topic": "",
+        "alert_cooldown_minutes": 10,
+        "scanner_id": "pi",
+    }
 
 
 def save_settings(s: dict):
@@ -50,8 +60,128 @@ def get_local_ip() -> str:
         return "unknown"
 
 
-# Start scanner once at import time
+def get_scanner_data_file(scanner_id: str) -> Path:
+    """Pi uses the default data file; other scanners get their own."""
+    settings = load_settings()
+    if scanner_id == settings.get("scanner_id", "pi"):
+        return ble_scanner.DATA_FILE
+    return Path(__file__).parent / f"scanner_{scanner_id}_data.json"
+
+
+def load_scanner_data(scanner_id: str) -> dict:
+    f = get_scanner_data_file(scanner_id)
+    if f.exists():
+        try:
+            return json.loads(f.read_text())
+        except Exception:
+            pass
+    return {"devices": {}, "history": [], "scan_log": []}
+
+
+def save_scanner_data(scanner_id: str, data: dict):
+    get_scanner_data_file(scanner_id).write_text(json.dumps(data, indent=2))
+
+
+def send_ntfy_alert(topic: str, zone_name: str, count: int, threshold: int):
+    try:
+        payload = json.dumps({
+            "topic": topic,
+            "title": f"\u26a0\ufe0f Zone alert: {zone_name}",
+            "message": f"Occupancy is {count} — threshold is {threshold}.",
+            "priority": "high",
+            "tags": ["warning"],
+        }).encode()
+        req = urllib.request.Request(
+            "https://ntfy.sh",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=5)
+        print(f"[Alert] ntfy sent for zone '{zone_name}': {count}/{threshold}", flush=True)
+    except Exception as e:
+        print(f"[Alert] ntfy failed: {e}", flush=True)
+
+
+def check_and_alert(scanner_id: str, active_count: int):
+    settings = load_settings()
+    topic = settings.get("ntfy_topic", "").strip()
+    if not topic:
+        return
+    cooldown_secs = settings.get("alert_cooldown_minutes", 10) * 60
+    now = time.time()
+    zones_data = load_zones_data()
+    for zone in zones_data.get("zones", []):
+        if zone.get("scanner_id", "pi") != scanner_id:
+            continue
+        threshold = zone.get("threshold")
+        if threshold is None:
+            continue
+        if active_count > threshold:
+            last = _alert_cooldowns.get(zone["id"], 0)
+            if now - last > cooldown_secs:
+                _alert_cooldowns[zone["id"]] = now
+                send_ntfy_alert(topic, zone["name"], active_count, threshold)
+
+
+def process_external_scan(scanner_id: str, discovered: dict) -> int:
+    """Process a scan report from an external scanner (ESP, second Pi, etc.)."""
+    now = time.time()
+    data = load_scanner_data(scanner_id)
+
+    for mac, dev in data["devices"].items():
+        if mac not in discovered:
+            dev["miss_count"] = dev.get("miss_count", 0) + 1
+
+    for mac, info in discovered.items():
+        random = ble_scanner.is_random_mac(mac)
+        if mac not in data["devices"]:
+            data["devices"][mac] = {
+                "first_seen": now,
+                "last_seen": now,
+                "name": info.get("name", "Unknown"),
+                "rssi": info.get("rssi", -100),
+                "random_mac": random,
+                "miss_count": 0,
+            }
+        else:
+            data["devices"][mac]["last_seen"] = now
+            data["devices"][mac]["rssi"] = info.get("rssi", -100)
+            data["devices"][mac]["miss_count"] = 0
+            if info.get("name") and info["name"] != "Unknown":
+                data["devices"][mac]["name"] = info["name"]
+
+    pruned = {}
+    for mac, dev in data["devices"].items():
+        miss = dev.get("miss_count", 0)
+        limit = ble_scanner.MAX_MISSED_RANDOM if dev.get("random_mac") else ble_scanner.MAX_MISSED_SCANS
+        if miss < limit:
+            pruned[mac] = dev
+    data["devices"] = pruned
+
+    day_ago = now - 86400
+    data["devices"] = {k: v for k, v in data["devices"].items() if v["last_seen"] > day_ago}
+
+    settings = load_settings()
+    rssi_min = settings.get("rssi_threshold", -100)
+    active = ble_scanner.get_active_count(data, rssi_min=rssi_min)
+
+    data["history"].append({"timestamp": now, "count": active})
+    data["history"] = data["history"][-100:]
+    data["scan_log"] = (data.get("scan_log", []) + [{"timestamp": now, "found": len(discovered), "active": active}])[-10:]
+
+    save_scanner_data(scanner_id, data)
+    print(f"[Scanner:{scanner_id}] {len(discovered)} found, {active} active", flush=True)
+    return active
+
+
+# Start Pi scanner and register alert callback
 if ble_scanner.BLEAK_AVAILABLE:
+    def _on_pi_scan(active_count: int):
+        settings = load_settings()
+        check_and_alert(settings.get("scanner_id", "pi"), active_count)
+
+    ble_scanner.register_scan_callback(_on_pi_scan)
     ble_scanner.start_scanner_background()
 
 app = FastAPI(title="BLE Occupancy API")
@@ -85,6 +215,7 @@ def get_status():
 def get_live():
     settings = load_settings()
     rssi_min = settings.get("rssi_threshold", -100)
+    pi_scanner_id = settings.get("scanner_id", "pi")
 
     data = ble_scanner.load_data()
     active = ble_scanner.get_active_count(data, rssi_min=rssi_min)
@@ -123,6 +254,17 @@ def get_live():
             "status": status,
         })
 
+    # Per-zone occupancy: load each zone's assigned scanner count
+    zones_data = load_zones_data()
+    scanner_counts: dict[str, int] = {pi_scanner_id: active}
+    zone_occupancy = {}
+    for zone in zones_data.get("zones", []):
+        sid = zone.get("scanner_id", "pi")
+        if sid not in scanner_counts:
+            sd = load_scanner_data(sid)
+            scanner_counts[sid] = ble_scanner.get_active_count(sd, rssi_min=rssi_min)
+        zone_occupancy[zone["id"]] = scanner_counts[sid]
+
     return {
         "current_occupancy": active,
         "tracked_devices": total_tracked,
@@ -147,11 +289,17 @@ def get_live():
             for s in reversed(scan_log_raw)
         ],
         "devices": devices_list,
+        "zone_occupancy": zone_occupancy,
     }
 
 
+# ── Settings ──────────────────────────────────────────────────────────────────
+
 class SettingsUpdate(BaseModel):
-    rssi_threshold: int
+    rssi_threshold: Optional[int] = None
+    ntfy_topic: Optional[str] = None
+    alert_cooldown_minutes: Optional[int] = None
+    scanner_id: Optional[str] = None
 
 
 @app.get("/api/settings")
@@ -161,12 +309,34 @@ def get_settings():
 
 @app.post("/api/settings")
 def update_settings(body: SettingsUpdate):
-    if not (-100 <= body.rssi_threshold <= -30):
-        raise HTTPException(status_code=422, detail="rssi_threshold must be between -100 and -30")
     current = load_settings()
-    current["rssi_threshold"] = body.rssi_threshold
+    if body.rssi_threshold is not None:
+        if not (-100 <= body.rssi_threshold <= -30):
+            raise HTTPException(status_code=422, detail="rssi_threshold must be between -100 and -30")
+        current["rssi_threshold"] = body.rssi_threshold
+    if body.ntfy_topic is not None:
+        current["ntfy_topic"] = body.ntfy_topic.strip()
+    if body.alert_cooldown_minutes is not None:
+        if body.alert_cooldown_minutes < 1:
+            raise HTTPException(status_code=422, detail="alert_cooldown_minutes must be >= 1")
+        current["alert_cooldown_minutes"] = body.alert_cooldown_minutes
+    if body.scanner_id is not None:
+        current["scanner_id"] = body.scanner_id.strip()
     save_settings(current)
     return current
+
+
+# ── External scanner report ───────────────────────────────────────────────────
+
+class ScannerReport(BaseModel):
+    devices: dict  # mac -> {name: str, rssi: int}
+
+
+@app.post("/api/scanner/{scanner_id}/report")
+def scanner_report(scanner_id: str, body: ScannerReport):
+    active = process_external_scan(scanner_id, body.devices)
+    check_and_alert(scanner_id, active)
+    return {"ok": True, "scanner_id": scanner_id, "active": active}
 
 
 # ── Zones ─────────────────────────────────────────────────────────────────────
@@ -181,12 +351,16 @@ class ZoneCreate(BaseModel):
     name: str
     color: str
     coordinates: list
+    scanner_id: str = "pi"
+    threshold: Optional[int] = None
 
 
 class ZoneUpdate(BaseModel):
-    name: str = None
-    color: str = None
-    coordinates: list = None
+    name: Optional[str] = None
+    color: Optional[str] = None
+    coordinates: Optional[list] = None
+    scanner_id: Optional[str] = None
+    threshold: Optional[int] = None
 
 
 @app.get("/api/zones")
@@ -210,6 +384,8 @@ def create_zone(body: ZoneCreate):
         "name": body.name,
         "color": body.color,
         "coordinates": body.coordinates,
+        "scanner_id": body.scanner_id,
+        "threshold": body.threshold,
     }
     data["zones"].append(zone)
     save_zones_data(data)
@@ -227,6 +403,10 @@ def update_zone(zone_id: str, body: ZoneUpdate):
                 zone["color"] = body.color
             if body.coordinates is not None:
                 zone["coordinates"] = body.coordinates
+            if body.scanner_id is not None:
+                zone["scanner_id"] = body.scanner_id
+            if body.threshold is not None:
+                zone["threshold"] = body.threshold
             save_zones_data(data)
             return zone
     raise HTTPException(status_code=404, detail="Zone not found")

@@ -12,12 +12,13 @@ import "@geoman-io/leaflet-geoman-free";
 import "@geoman-io/leaflet-geoman-free/dist/leaflet-geoman.css";
 import "leaflet/dist/leaflet.css";
 import "./zones.css";
-import { Search, Settings2, Trash2, Check, MapPin } from "lucide-react";
+import { Search, Settings2, Trash2, Check, MapPin, Bell } from "lucide-react";
 import {
   getZones,
   saveMapConfig,
   createZone,
   deleteZone,
+  getLiveData,
 } from "../../data/api";
 
 // Fix Leaflet default icon paths broken by Vite's asset hashing
@@ -30,13 +31,13 @@ L.Icon.Default.mergeOptions({
 });
 
 const ZONE_COLORS = [
+  "#3b82f6",
+  "#06b6d4",
+  "#8b5cf6",
+  "#22c55e",
   "#ef4444",
   "#f97316",
   "#eab308",
-  "#22c55e",
-  "#06b6d4",
-  "#3b82f6",
-  "#8b5cf6",
   "#ec4899",
 ];
 
@@ -94,6 +95,7 @@ function GeomanControls({ enabled, onCreated }) {
       drawPolyline: false,
       drawMarker: false,
       drawText: false,
+      drawPolygon: false,
       rotateMode: false,
       cutPolygon: false,
     });
@@ -123,6 +125,7 @@ export function ZonesView() {
   const [mapConfig, setMapConfig] = useState(null);
   const [zones, setZones] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [zoneOccupancy, setZoneOccupancy] = useState({});
 
   const [currentCenter, setCurrentCenter] = useState(DEFAULT_CENTER);
   const [currentZoom, setCurrentZoom] = useState(DEFAULT_ZOOM);
@@ -135,6 +138,8 @@ export function ZonesView() {
 
   const [pendingCoords, setPendingCoords] = useState(null);
   const [zoneName, setZoneName] = useState("");
+  const [zoneScannerId, setZoneScannerId] = useState("pi");
+  const [zoneThreshold, setZoneThreshold] = useState("");
   const zoneNameRef = useRef(null);
 
   useEffect(() => {
@@ -151,6 +156,18 @@ export function ZonesView() {
       })
       .catch(() => {})
       .finally(() => setLoading(false));
+  }, []);
+
+  // Poll live data for per-zone occupancy
+  useEffect(() => {
+    const fetchOccupancy = () => {
+      getLiveData()
+        .then((d) => setZoneOccupancy(d.zone_occupancy ?? {}))
+        .catch(() => {});
+    };
+    fetchOccupancy();
+    const id = setInterval(fetchOccupancy, 7000);
+    return () => clearInterval(id);
   }, []);
 
   useEffect(() => {
@@ -205,19 +222,26 @@ export function ZonesView() {
   const handleZoneCreated = useCallback((coords) => {
     setPendingCoords(coords);
     setZoneName("");
+    setZoneScannerId("pi");
+    setZoneThreshold("");
   }, []);
 
   const saveZone = async () => {
     if (!zoneName.trim() || !pendingCoords) return;
     const color = ZONE_COLORS[zones.length % ZONE_COLORS.length];
+    const threshold = zoneThreshold !== "" ? parseInt(zoneThreshold, 10) : null;
     const zone = await createZone({
       name: zoneName.trim(),
       color,
       coordinates: pendingCoords,
+      scanner_id: zoneScannerId.trim() || "pi",
+      threshold: isNaN(threshold) ? null : threshold,
     });
     setZones((prev) => [...prev, zone]);
     setPendingCoords(null);
     setZoneName("");
+    setZoneScannerId("pi");
+    setZoneThreshold("");
   };
 
   const removeZone = async (id) => {
@@ -298,28 +322,57 @@ export function ZonesView() {
             </div>
           ) : (
             <div className="flex flex-col gap-2 overflow-y-auto">
-              {zones.map((z) => (
-                <div
-                  key={z.id}
-                  className="flex items-center gap-2.5 rounded-lg border border-border bg-card px-3 py-2.5"
-                >
-                  <span
-                    className="h-2.5 w-2.5 rounded-full shrink-0"
-                    style={{ backgroundColor: z.color }}
-                  />
-                  <span className="flex-1 truncate text-sm text-foreground">
-                    {z.name}
-                  </span>
-                  {step === "draw-zones" && (
-                    <button
-                      onClick={() => removeZone(z.id)}
-                      className="text-muted-foreground hover:text-red-400 transition-colors shrink-0"
-                    >
-                      <Trash2 size={13} />
-                    </button>
-                  )}
-                </div>
-              ))}
+              {zones.map((z) => {
+                const count = zoneOccupancy[z.id] ?? null;
+                const threshold = z.threshold ?? null;
+                const overThreshold = threshold !== null && count !== null && count > threshold;
+                return (
+                  <div
+                    key={z.id}
+                    className={`flex flex-col gap-1.5 rounded-lg border bg-card px-3 py-2.5 ${
+                      overThreshold ? "border-red-500/60" : "border-border"
+                    }`}
+                  >
+                    <div className="flex items-center gap-2.5">
+                      <span
+                        className="h-2.5 w-2.5 rounded-full shrink-0"
+                        style={{ backgroundColor: z.color }}
+                      />
+                      <span className="flex-1 truncate text-sm text-foreground">
+                        {z.name}
+                      </span>
+                      {overThreshold && (
+                        <Bell size={12} className="text-red-400 shrink-0" />
+                      )}
+                      {step === "draw-zones" && (
+                        <button
+                          onClick={() => removeZone(z.id)}
+                          className="text-muted-foreground hover:text-red-400 transition-colors shrink-0"
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      )}
+                    </div>
+                    {(count !== null || threshold !== null) && (
+                      <div className="flex items-center justify-between text-xs text-muted-foreground pl-5">
+                        <span>
+                          {count !== null ? count : "—"} active
+                        </span>
+                        {threshold !== null && (
+                          <span className={overThreshold ? "text-red-400 font-medium" : ""}>
+                            limit {threshold}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                    {z.scanner_id && z.scanner_id !== "pi" && (
+                      <p className="text-xs text-muted-foreground/60 pl-5 truncate">
+                        {z.scanner_id}
+                      </p>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
 
@@ -406,29 +459,68 @@ export function ZonesView() {
           )}
           {step === "draw-zones" && !pendingCoords && (
             <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-999 rounded-full border border-border/60 bg-black/60 backdrop-blur-sm px-4 py-1.5 text-xs text-muted-foreground pointer-events-none whitespace-nowrap">
-              Use the toolbar on the left to draw rectangle or polygon zones
+              Use the toolbar on the left to draw a rectangle zone
             </div>
           )}
 
           {/* Zone naming dialog */}
           {pendingCoords && (
             <div className="absolute inset-0 z-2000 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-              <div className="w-72 rounded-xl border border-border bg-card p-5 shadow-2xl">
+              <div className="w-80 rounded-xl border border-border bg-card p-5 shadow-2xl">
                 <p className="mb-1 text-sm font-semibold text-foreground">
                   Name this zone
                 </p>
                 <p className="mb-3 text-xs text-muted-foreground">
-                  Give this area a descriptive name.
+                  Configure the zone name, scanner, and alert threshold.
                 </p>
-                <input
-                  ref={zoneNameRef}
-                  type="text"
-                  value={zoneName}
-                  onChange={(e) => setZoneName(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && saveZone()}
-                  placeholder="e.g. Entrance Hall"
-                  className="mb-4 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
-                />
+
+                <div className="space-y-3 mb-4">
+                  <div>
+                    <label className="mb-1 block text-xs text-muted-foreground">Zone name</label>
+                    <input
+                      ref={zoneNameRef}
+                      type="text"
+                      value={zoneName}
+                      onChange={(e) => setZoneName(e.target.value)}
+                      onKeyDown={(e) => e.key === "Enter" && saveZone()}
+                      placeholder="e.g. Entrance Hall"
+                      className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="mb-1 block text-xs text-muted-foreground">Scanner ID</label>
+                    <input
+                      type="text"
+                      value={zoneScannerId}
+                      onChange={(e) => setZoneScannerId(e.target.value)}
+                      placeholder="pi"
+                      className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                    />
+                    <p className="mt-1 text-xs text-muted-foreground/60">
+                      Use the scanner_id set in Settings (default: pi)
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="mb-1 block text-xs text-muted-foreground">
+                      Alert threshold
+                      <span className="ml-1 text-muted-foreground/50">(optional)</span>
+                    </label>
+                    <input
+                      type="number"
+                      min={1}
+                      value={zoneThreshold}
+                      onChange={(e) => setZoneThreshold(e.target.value)}
+                      placeholder="e.g. 10"
+                      className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                    />
+                    <p className="mt-1 text-xs text-muted-foreground/60">
+                      Sends ntfy alert when active devices exceed this count
+                    </p>
+                  </div>
+                </div>
+
                 <div className="flex gap-2">
                   <button
                     onClick={() => setPendingCoords(null)}

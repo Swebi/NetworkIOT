@@ -54,3 +54,7 @@ export const createZone = (body) => post("/api/zones", body);
 export const updateZone = (id, body) => put(`/api/zones/${id}`, body);
 /** Delete zone by id */
 export const deleteZone = (id) => del(`/api/zones/${id}`);
+
+/** Report scan results from an external scanner (ESP etc.) */
+export const reportScan = (scanner_id, devices) =>
+  post(`/api/scanner/${encodeURIComponent(scanner_id)}/report`, { devices });
