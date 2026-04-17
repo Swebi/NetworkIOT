@@ -1,0 +1,56 @@
+/* ── Leaflet container ─────────────────────────────────────────────────────── */
+.leaflet-container {
+  background: #1a1a2e;
+  font-family: inherit;
+}
+
+/* ── Attribution ───────────────────────────────────────────────────────────── */
+.leaflet-control-attribution {
+  background: rgba(0, 0, 0, 0.55) !important;
+  color: rgba(255, 255, 255, 0.45) !important;
+  font-size: 10px !important;
+}
+.leaflet-control-attribution a {
+  color: rgba(255, 255, 255, 0.6) !important;
+}
+
+/* ── Geoman toolbar ────────────────────────────────────────────────────────── */
+.leaflet-pm-toolbar .button-container .leaflet-pm-icon-polygon,
+.leaflet-pm-toolbar .button-container a {
+  background-color: hsl(var(--card, 222 20% 12%)) !important;
+  border-color: hsl(var(--border, 222 15% 22%)) !important;
+  color: hsl(var(--foreground, 210 20% 95%)) !important;
+}
+
+.leaflet-pm-toolbar .button-container a:hover {
+  background-color: hsl(var(--muted, 222 15% 18%)) !important;
+}
+
+.leaflet-pm-toolbar .button-container a.active {
+  background-color: hsl(var(--primary, 217 91% 60%)) !important;
+  border-color: hsl(var(--primary, 217 91% 60%)) !important;
+}
+
+.leaflet-pm-toolbar {
+  filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.6));
+}
+
+/* ── Geoman edit/draw helpers ──────────────────────────────────────────────── */
+.leaflet-pm-draw-polygon,
+.leaflet-pm-draw-rectangle {
+  cursor: crosshair !important;
+}
+
+/* ── Zone tooltip ──────────────────────────────────────────────────────────── */
+.leaflet-tooltip {
+  background: rgba(0, 0, 0, 0.75) !important;
+  border: 1px solid rgba(255, 255, 255, 0.1) !important;
+  color: rgba(255, 255, 255, 0.9) !important;
+  border-radius: 6px !important;
+  font-size: 12px !important;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4) !important;
+  backdrop-filter: blur(4px);
+}
+.leaflet-tooltip::before {
+  display: none;
+}

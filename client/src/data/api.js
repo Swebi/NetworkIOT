@@ -27,3 +27,30 @@ export const getSettings = () => get("/api/settings");
 
 /** Save RSSI threshold: { rssi_threshold: number } */
 export const updateSettings = (body) => post("/api/settings", body);
+
+async function put(path, body) {
+  const res = await fetch(`${BASE}${path}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`${res.status} ${path}`);
+  return res.json();
+}
+
+async function del(path) {
+  const res = await fetch(`${BASE}${path}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(`${res.status} ${path}`);
+  return res.json();
+}
+
+/** Zones config + list */
+export const getZones = () => get("/api/zones");
+/** Save map viewport: { lat, lng, zoom } */
+export const saveMapConfig = (body) => post("/api/zones/config", body);
+/** Create zone: { name, color, coordinates } */
+export const createZone = (body) => post("/api/zones", body);
+/** Update zone fields */
+export const updateZone = (id, body) => put(`/api/zones/${id}`, body);
+/** Delete zone by id */
+export const deleteZone = (id) => del(`/api/zones/${id}`);

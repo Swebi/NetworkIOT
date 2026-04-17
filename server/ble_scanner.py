@@ -194,55 +194,46 @@ def _process_scan_results(discovered: dict) -> None:
 
 async def _scan_loop_async() -> None:
     """
-    Long-running async loop that keeps a *single* BleakScanner alive.
-    Each cycle: start scanning → collect for SCAN_DURATION → stop → process.
-    Re-using the same scanner & event loop avoids the BlueZ D-Bus "busy" issue.
+    Keeps a single BleakScanner open permanently — no start/stop cycling.
+    BlueZ's StopDiscovery is async under the hood, so repeated start/stop
+    within the same process causes InProgress errors.  Instead we hold the
+    scanner open and clear the accumulator every SCAN_DURATION seconds.
     """
     global SCANNER_ERROR
 
-    retry_delay = SCAN_DURATION
+    discovered: dict[str, dict] = {}
+
+    def _detection_callback(device, advertisement_data):
+        discovered[device.address] = {
+            "name": _identify_device(device, advertisement_data),
+            "rssi": advertisement_data.rssi,
+        }
+
+    retry_delay = SCAN_PAUSE
 
     while True:
-        discovered: dict[str, dict] = {}
-
-        def _detection_callback(device, advertisement_data):
-            """Called for every BLE advertisement received."""
-            discovered[device.address] = {
-                "name": _identify_device(device, advertisement_data),
-                "rssi": advertisement_data.rssi,
-            }
-
-        scanner = BleakScanner(detection_callback=_detection_callback)
-
         try:
-            await scanner.start()
-            await asyncio.sleep(SCAN_DURATION)
-            await scanner.stop()
-
-            SCANNER_ERROR = ""
-            retry_delay = SCAN_DURATION
-
-            _process_scan_results(discovered)
+            async with BleakScanner(detection_callback=_detection_callback):
+                SCANNER_ERROR = ""
+                print("[BLE] Scanner started — running continuously.", flush=True)
+                while True:
+                    await asyncio.sleep(SCAN_DURATION)
+                    snapshot = dict(discovered)
+                    discovered.clear()
+                    _process_scan_results(snapshot)
+                    await asyncio.sleep(SCAN_PAUSE)
 
         except BleakError as e:
             SCANNER_ERROR = str(e.args[0]) if e.args else str(e)
             print(f"[BLE] Bluetooth error: {SCANNER_ERROR}", flush=True)
+            await asyncio.sleep(retry_delay)
             retry_delay = min(retry_delay * 2, 60)
-            try:
-                await scanner.stop()
-            except Exception:
-                pass
 
         except Exception as e:
             SCANNER_ERROR = str(e)
             print(f"[BLE] Scan error: {e}", flush=True)
+            await asyncio.sleep(retry_delay)
             retry_delay = min(retry_delay * 2, 60)
-            try:
-                await scanner.stop()
-            except Exception:
-                pass
-
-        await asyncio.sleep(SCAN_PAUSE if not SCANNER_ERROR else retry_delay)
 
 
 def scanner_loop() -> None:
@@ -250,11 +241,25 @@ def scanner_loop() -> None:
     Entry point for the background thread.
     Creates ONE event loop and runs the async scan loop inside it forever.
     """
+    import subprocess
+
     global SCANNER_ERROR
     if not BLEAK_AVAILABLE:
         print("bleak not installed – run: pip install bleak")
         SCANNER_ERROR = "bleak not installed. Run: pip install bleak"
         return
+
+    # BlueZ keeps a scan descriptor alive for a few seconds after the previous
+    # process dies.  Explicitly stopping discovery clears it before we start.
+    try:
+        subprocess.run(
+            ["bluetoothctl", "--", "scan", "off"],
+            capture_output=True,
+            timeout=3,
+        )
+        time.sleep(1)
+    except Exception:
+        pass
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)

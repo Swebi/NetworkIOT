@@ -17,6 +17,17 @@ sys.path.insert(0, str(Path(__file__).parent))
 import ble_scanner
 
 SETTINGS_FILE = Path(__file__).parent / "settings.json"
+ZONES_FILE = Path(__file__).parent / "zones.json"
+
+
+def load_zones_data() -> dict:
+    if ZONES_FILE.exists():
+        return json.loads(ZONES_FILE.read_text())
+    return {"config": None, "zones": []}
+
+
+def save_zones_data(data: dict):
+    ZONES_FILE.write_text(json.dumps(data, indent=2))
 
 
 def load_settings() -> dict:
@@ -140,3 +151,74 @@ def update_settings(body: SettingsUpdate):
     current["rssi_threshold"] = body.rssi_threshold
     save_settings(current)
     return current
+
+
+# ── Zones ─────────────────────────────────────────────────────────────────────
+
+class MapConfigBody(BaseModel):
+    lat: float
+    lng: float
+    zoom: int
+
+
+class ZoneCreate(BaseModel):
+    name: str
+    color: str
+    coordinates: list
+
+
+class ZoneUpdate(BaseModel):
+    name: str = None
+    color: str = None
+    coordinates: list = None
+
+
+@app.get("/api/zones")
+def get_zones():
+    return load_zones_data()
+
+
+@app.post("/api/zones/config")
+def set_map_config(body: MapConfigBody):
+    data = load_zones_data()
+    data["config"] = body.model_dump()
+    save_zones_data(data)
+    return data
+
+
+@app.post("/api/zones")
+def create_zone(body: ZoneCreate):
+    data = load_zones_data()
+    zone = {
+        "id": str(int(time.time() * 1000)),
+        "name": body.name,
+        "color": body.color,
+        "coordinates": body.coordinates,
+    }
+    data["zones"].append(zone)
+    save_zones_data(data)
+    return zone
+
+
+@app.put("/api/zones/{zone_id}")
+def update_zone(zone_id: str, body: ZoneUpdate):
+    data = load_zones_data()
+    for zone in data["zones"]:
+        if zone["id"] == zone_id:
+            if body.name is not None:
+                zone["name"] = body.name
+            if body.color is not None:
+                zone["color"] = body.color
+            if body.coordinates is not None:
+                zone["coordinates"] = body.coordinates
+            save_zones_data(data)
+            return zone
+    raise HTTPException(status_code=404, detail="Zone not found")
+
+
+@app.delete("/api/zones/{zone_id}")
+def delete_zone_endpoint(zone_id: str):
+    data = load_zones_data()
+    data["zones"] = [z for z in data["zones"] if z["id"] != zone_id]
+    save_zones_data(data)
+    return {"ok": True}

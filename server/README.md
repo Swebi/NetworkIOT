@@ -36,3 +36,6 @@ Then open `http://<pi-ip>:8501` in a browser.
 - **Bluetooth permissions**: On some setups you may need `sudo` or add your user to the `bluetooth` group: `sudo usermod -aG bluetooth $USER`
 - **Privacy**: MAC addresses are randomized on many modern devices; treat counts as estimates, not exact people
 - **Range**: BLE range is typically 10–30m indoors
+
+
+uvicorn api:app --host 0.0.0.0 --port 8000
