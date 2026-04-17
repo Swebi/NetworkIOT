@@ -12,11 +12,12 @@ import "@geoman-io/leaflet-geoman-free";
 import "@geoman-io/leaflet-geoman-free/dist/leaflet-geoman.css";
 import "leaflet/dist/leaflet.css";
 import "./zones.css";
-import { Search, Settings2, Trash2, Check, MapPin, Bell } from "lucide-react";
+import { Search, Settings2, Trash2, Check, MapPin, Bell, Pencil, X } from "lucide-react";
 import {
   getZones,
   saveMapConfig,
   createZone,
+  updateZone,
   deleteZone,
   getLiveData,
 } from "../../data/api";
@@ -141,6 +142,29 @@ export function ZonesView() {
   const [zoneScannerId, setZoneScannerId] = useState("pi");
   const [zoneThreshold, setZoneThreshold] = useState("");
   const zoneNameRef = useRef(null);
+
+  // Inline edit state: { id, threshold, scanner_id }
+  const [editingZone, setEditingZone] = useState(null);
+
+  const startEdit = (z) => {
+    setEditingZone({
+      id: z.id,
+      threshold: z.threshold != null ? String(z.threshold) : "",
+      scanner_id: z.scanner_id ?? "pi",
+    });
+  };
+
+  const saveEdit = async () => {
+    if (!editingZone) return;
+    const threshold =
+      editingZone.threshold !== "" ? parseInt(editingZone.threshold, 10) : null;
+    const updated = await updateZone(editingZone.id, {
+      threshold: isNaN(threshold) ? null : threshold,
+      scanner_id: editingZone.scanner_id.trim() || "pi",
+    });
+    setZones((prev) => prev.map((z) => (z.id === updated.id ? updated : z)));
+    setEditingZone(null);
+  };
 
   useEffect(() => {
     getZones()
@@ -326,6 +350,7 @@ export function ZonesView() {
                 const count = zoneOccupancy[z.id] ?? null;
                 const threshold = z.threshold ?? null;
                 const overThreshold = threshold !== null && count !== null && count > threshold;
+                const isEditing = editingZone?.id === z.id;
                 return (
                   <div
                     key={z.id}
@@ -341,10 +366,18 @@ export function ZonesView() {
                       <span className="flex-1 truncate text-sm text-foreground">
                         {z.name}
                       </span>
-                      {overThreshold && (
+                      {overThreshold && !isEditing && (
                         <Bell size={12} className="text-red-400 shrink-0" />
                       )}
-                      {step === "draw-zones" && (
+                      {!isEditing && (
+                        <button
+                          onClick={() => startEdit(z)}
+                          className="text-muted-foreground hover:text-foreground transition-colors shrink-0"
+                        >
+                          <Pencil size={12} />
+                        </button>
+                      )}
+                      {step === "draw-zones" && !isEditing && (
                         <button
                           onClick={() => removeZone(z.id)}
                           className="text-muted-foreground hover:text-red-400 transition-colors shrink-0"
@@ -353,22 +386,76 @@ export function ZonesView() {
                         </button>
                       )}
                     </div>
-                    {(count !== null || threshold !== null) && (
-                      <div className="flex items-center justify-between text-xs text-muted-foreground pl-5">
-                        <span>
-                          {count !== null ? count : "—"} active
-                        </span>
-                        {threshold !== null && (
-                          <span className={overThreshold ? "text-red-400 font-medium" : ""}>
-                            limit {threshold}
-                          </span>
-                        )}
+
+                    {isEditing ? (
+                      <div className="flex flex-col gap-2 pt-1">
+                        <div>
+                          <label className="mb-0.5 block text-xs text-muted-foreground">Threshold</label>
+                          <input
+                            type="number"
+                            min={1}
+                            autoFocus
+                            value={editingZone.threshold}
+                            onChange={(e) =>
+                              setEditingZone((prev) => ({ ...prev, threshold: e.target.value }))
+                            }
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") saveEdit();
+                              if (e.key === "Escape") setEditingZone(null);
+                            }}
+                            placeholder="e.g. 10"
+                            className="w-full rounded border border-border bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                          />
+                        </div>
+                        <div>
+                          <label className="mb-0.5 block text-xs text-muted-foreground">Scanner ID</label>
+                          <input
+                            type="text"
+                            value={editingZone.scanner_id}
+                            onChange={(e) =>
+                              setEditingZone((prev) => ({ ...prev, scanner_id: e.target.value }))
+                            }
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") saveEdit();
+                              if (e.key === "Escape") setEditingZone(null);
+                            }}
+                            placeholder="pi"
+                            className="w-full rounded border border-border bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                          />
+                        </div>
+                        <div className="flex gap-1.5">
+                          <button
+                            onClick={saveEdit}
+                            className="flex-1 rounded bg-primary py-1 text-xs font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
+                          >
+                            Save
+                          </button>
+                          <button
+                            onClick={() => setEditingZone(null)}
+                            className="rounded border border-border px-2 py-1 text-muted-foreground hover:text-foreground transition-colors"
+                          >
+                            <X size={11} />
+                          </button>
+                        </div>
                       </div>
-                    )}
-                    {z.scanner_id && z.scanner_id !== "pi" && (
-                      <p className="text-xs text-muted-foreground/60 pl-5 truncate">
-                        {z.scanner_id}
-                      </p>
+                    ) : (
+                      <>
+                        {(count !== null || threshold !== null) && (
+                          <div className="flex items-center justify-between text-xs text-muted-foreground pl-5">
+                            <span>{count !== null ? count : "—"} active</span>
+                            {threshold !== null && (
+                              <span className={overThreshold ? "text-red-400 font-medium" : ""}>
+                                limit {threshold}
+                              </span>
+                            )}
+                          </div>
+                        )}
+                        {z.scanner_id && z.scanner_id !== "pi" && (
+                          <p className="text-xs text-muted-foreground/60 pl-5 truncate">
+                            {z.scanner_id}
+                          </p>
+                        )}
+                      </>
                     )}
                   </div>
                 );
