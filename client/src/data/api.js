@@ -58,3 +58,7 @@ export const deleteZone = (id) => del(`/api/zones/${id}`);
 /** Report scan results from an external scanner (ESP etc.) */
 export const reportScan = (scanner_id, devices) =>
   post(`/api/scanner/${encodeURIComponent(scanner_id)}/report`, { devices });
+
+/** Send a chat message to the AI with conversation history */
+export const chatWithAI = (message, history = []) =>
+  post("/api/ai/chat", { message, history });

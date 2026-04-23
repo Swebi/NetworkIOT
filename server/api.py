@@ -3,6 +3,7 @@ FastAPI server for BLE occupancy monitoring.
 Run on the Pi with: uvicorn api:app --host 0.0.0.0 --port 8000
 """
 import json
+import os
 import socket
 import time
 import urllib.request
@@ -416,3 +417,126 @@ def delete_zone_endpoint(zone_id: str):
     data["zones"] = [z for z in data["zones"] if z["id"] != zone_id]
     save_zones_data(data)
     return {"ok": True}
+
+
+# ── AI Chat ───────────────────────────────────────────────────────────────────
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class ChatRequest(BaseModel):
+    message: str
+    history: list[ChatMessage] = []
+
+
+@app.post("/api/ai/chat")
+def ai_chat(body: ChatRequest):
+    api_key = os.environ.get("GROK_API_KEY", "").strip()
+    if not api_key:
+        raise HTTPException(status_code=500, detail="GROK_API_KEY environment variable not set on the server.")
+
+    settings = load_settings()
+    rssi_min = settings.get("rssi_threshold", -100)
+    pi_scanner_id = settings.get("scanner_id", "pi")
+
+    data = ble_scanner.load_data()
+    active = ble_scanner.get_active_count(data, rssi_min=rssi_min)
+
+    zones_data = load_zones_data()
+    scanner_counts: dict[str, int] = {pi_scanner_id: active}
+    zones_info = []
+    for zone in zones_data.get("zones", []):
+        sid = zone.get("scanner_id", "pi")
+        if sid not in scanner_counts:
+            sd = load_scanner_data(sid)
+            scanner_counts[sid] = ble_scanner.get_active_count(sd, rssi_min=rssi_min)
+        occupancy = scanner_counts[sid]
+        threshold = zone.get("threshold")
+        at_risk = threshold is not None and occupancy >= threshold * 0.8
+        overcrowded = threshold is not None and occupancy > threshold
+        zones_info.append({
+            "name": zone["name"],
+            "scanner_id": sid,
+            "threshold": threshold,
+            "occupancy": occupancy,
+            "at_risk": at_risk,
+            "overcrowded": overcrowded,
+        })
+
+    devices_raw = data.get("devices", {})
+    total_tracked = len(devices_raw)
+    random_count = sum(1 for d in devices_raw.values() if d.get("random_mac"))
+    stable_count = total_tracked - random_count
+
+    history_pts = data.get("history", [])[-20:]
+    history_str = ", ".join(str(h["count"]) for h in history_pts) if history_pts else "no data"
+
+    if zones_info:
+        zones_str = "\n".join(
+            f'  - {z["name"]}: {z["occupancy"]} people'
+            + (f' / threshold {z["threshold"]}' if z["threshold"] is not None else " (no threshold)")
+            + (" [OVERCROWDED]" if z["overcrowded"] else " [AT RISK]" if z["at_risk"] else "")
+            for z in zones_info
+        )
+    else:
+        zones_str = "  No zones configured yet."
+
+    system_prompt = f"""You are an AI assistant for a BLE (Bluetooth Low Energy) occupancy monitoring system.
+You help facility managers understand crowd levels, identify risks, and make data-driven decisions.
+
+Current snapshot ({datetime.now().strftime("%Y-%m-%d %H:%M:%S")}):
+
+OVERALL:
+  Active occupancy: {active} people
+  Tracked devices: {total_tracked} total ({stable_count} stable MACs, {random_count} randomised MACs)
+  RSSI threshold: {rssi_min} dBm
+
+ZONES:
+{zones_str}
+
+RECENT OCCUPANCY HISTORY (oldest→newest, ~20 readings):
+  {history_str}
+
+SETTINGS:
+  Alert cooldown: {settings.get("alert_cooldown_minutes", 10)} min
+  Primary scanner ID: {pi_scanner_id}
+
+Rules:
+- Overcrowded = occupancy > threshold.
+- At risk = occupancy >= 80% of threshold.
+- Be concise (2–4 sentences) unless the user asks for detail.
+- If no zones are configured, tell the user to add zones first."""
+
+    messages = [{"role": "system", "content": system_prompt}]
+    for msg in body.history[-10:]:
+        messages.append({"role": msg.role, "content": msg.content})
+    messages.append({"role": "user", "content": body.message})
+
+    payload = json.dumps({
+        "model": "grok-3-mini",
+        "messages": messages,
+        "max_tokens": 512,
+        "temperature": 0.5,
+    }).encode()
+
+    req = urllib.request.Request(
+        "https://api.x.ai/v1/chat/completions",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read())
+            reply = result["choices"][0]["message"]["content"]
+            return {"reply": reply}
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="replace")
+        raise HTTPException(status_code=502, detail=f"Grok API error: {detail}")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"AI request failed: {str(e)}")

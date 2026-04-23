@@ -1,10 +1,11 @@
 import { NavLink } from "react-router-dom";
-import { LayoutDashboard, Layers, Settings } from "lucide-react";
+import { LayoutDashboard, Layers, Settings, Bot } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const navItems = [
   { path: "/", label: "Dashboard", icon: LayoutDashboard },
   { path: "/zones", label: "Zones", icon: Layers },
+  { path: "/ai", label: "AI Assistant", icon: Bot },
   { path: "/settings", label: "Settings", icon: Settings },
 ];
 
