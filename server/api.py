@@ -527,6 +527,7 @@ Rules:
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
+            "User-Agent": "python-requests/2.31.0",
         },
         method="POST",
     )
