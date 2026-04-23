@@ -433,9 +433,9 @@ class ChatRequest(BaseModel):
 
 @app.post("/api/ai/chat")
 def ai_chat(body: ChatRequest):
-    api_key = os.environ.get("GROK_API_KEY", "").strip()
+    api_key = os.environ.get("GROQ_API_KEY", "").strip()
     if not api_key:
-        raise HTTPException(status_code=500, detail="GROK_API_KEY environment variable not set on the server.")
+        raise HTTPException(status_code=500, detail="GROQ_API_KEY environment variable not set on the server.")
 
     settings = load_settings()
     rssi_min = settings.get("rssi_threshold", -100)
@@ -515,14 +515,14 @@ Rules:
     messages.append({"role": "user", "content": body.message})
 
     payload = json.dumps({
-        "model": "grok-3-mini",
+        "model": "llama-3.1-8b-instant",
         "messages": messages,
         "max_tokens": 512,
         "temperature": 0.5,
     }).encode()
 
     req = urllib.request.Request(
-        "https://api.x.ai/v1/chat/completions",
+        "https://api.groq.com/openai/v1/chat/completions",
         data=payload,
         headers={
             "Authorization": f"Bearer {api_key}",
