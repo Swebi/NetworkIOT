@@ -132,11 +132,11 @@ _mock_scanner_stop: dict[str, threading.Event] = {}
 
 
 def _build_mock_pool(scanner_id: str) -> list[dict]:
-    """Deterministic pool of 15 virtual BLE devices seeded by scanner_id."""
+    """Deterministic pool of 300 virtual BLE devices seeded by scanner_id."""
     rng = random.Random(hash(scanner_id) & 0xFFFFFFFF)
     names = ["Apple", "Samsung", "Google", "Microsoft", "Fitbit", "Garmin", "Sony", "Unknown"]
     pool = []
-    for _ in range(15):
+    for _ in range(300):
         octets = [rng.randint(0, 255) for _ in range(6)]
         octets[0] &= ~0x03  # clear bits 0-1: unicast + globally administered (stable MAC)
         mac = ":".join(f"{o:02X}" for o in octets)
@@ -144,21 +144,51 @@ def _build_mock_pool(scanner_id: str) -> list[dict]:
     return pool
 
 
+def _write_mock_data(scanner_id: str, target: int, pool: list) -> None:
+    """Directly write exactly `target` active devices to the scanner data file."""
+    now = time.time()
+    n = min(target, len(pool))
+    data = load_scanner_data(scanner_id)
+
+    # Replace device list with exactly n active entries from the pool
+    new_devices = {}
+    for i in range(n):
+        dev = pool[i]
+        mac = dev["mac"]
+        existing = data["devices"].get(mac, {})
+        new_devices[mac] = {
+            "first_seen": existing.get("first_seen", now),
+            "last_seen": now,
+            "name": dev["name"],
+            "rssi": random.randint(-75, -55),
+            "random_mac": False,
+            "miss_count": 0,
+        }
+    data["devices"] = new_devices
+
+    settings = load_settings()
+    rssi_min = settings.get("rssi_threshold", -100)
+    active = ble_scanner.get_active_count(data, rssi_min=rssi_min)
+
+    data["history"].append({"timestamp": now, "count": active})
+    data["history"] = data["history"][-100:]
+    data["scan_log"] = (
+        data.get("scan_log", []) + [{"timestamp": now, "found": n, "active": active}]
+    )[-10:]
+
+    save_scanner_data(scanner_id, data)
+    print(f"[Mock:{scanner_id}] target={target} active={active}", flush=True)
+
+
 def _mock_scanner_loop(scanner_id: str, stop_event: threading.Event) -> None:
     pool = _build_mock_pool(scanner_id)
     while not stop_event.is_set():
-        # Mirror Pi's current active count ±2-3
         pi_data = ble_scanner.load_data()
         settings = load_settings()
         rssi_min = settings.get("rssi_threshold", -100)
         pi_active = ble_scanner.get_active_count(pi_data, rssi_min=rssi_min)
-        n = max(0, min(len(pool), pi_active + random.randint(-3, 3)))
-        chosen = random.sample(pool, n)
-        discovered = {
-            dev["mac"]: {"name": dev["name"], "rssi": random.randint(-85, -55)}
-            for dev in chosen
-        }
-        process_external_scan(scanner_id, discovered)
+        target = max(0, pi_active + random.randint(-5, 5))
+        _write_mock_data(scanner_id, target, pool)
         stop_event.wait(7)
 
 
