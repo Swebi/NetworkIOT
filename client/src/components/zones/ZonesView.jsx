@@ -20,7 +20,16 @@ import {
   updateZone,
   deleteZone,
   getLiveData,
+  getZoneStats,
 } from "../../data/api";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
+import {
+  ChartContainer,
+  ChartTooltip,
+  ChartTooltipContent,
+} from "@/components/ui/chart";
+import { Area, AreaChart, XAxis, YAxis, CartesianGrid } from "recharts";
 
 // Fix Leaflet default icon paths broken by Vite's asset hashing
 delete L.Icon.Default.prototype._getIconUrl;
@@ -44,6 +53,8 @@ const ZONE_COLORS = [
 
 const DEFAULT_CENTER = [51.505, -0.09];
 const DEFAULT_ZOOM = 13;
+
+const historyConfig = { count: { label: "Occupancy", color: "#3b82f6" } };
 
 // ── Enable / disable map interaction ───────────────────────────────────────
 function MapInteractivity({ interactive }) {
@@ -119,6 +130,154 @@ function GeomanControls({ enabled, onCreated }) {
   return null;
 }
 
+// ── Zone stats panel ────────────────────────────────────────────────────────
+function ZoneStatsPanel({ zone, stats, loading }) {
+  if (loading && !stats) {
+    return (
+      <div className="space-y-4 pt-4">
+        <Skeleton className="h-6 w-40" />
+        <div className="grid gap-3 sm:grid-cols-3">
+          {[0, 1, 2].map((i) => <Skeleton key={i} className="h-20 rounded-lg" />)}
+        </div>
+        <Skeleton className="h-48 rounded-lg" />
+      </div>
+    );
+  }
+  if (!stats) return null;
+
+  const over = zone.threshold !== null && stats.active > zone.threshold;
+
+  return (
+    <div className="space-y-4 pt-4 border-t border-border">
+      <div className="flex items-center gap-2.5">
+        <span className="h-3 w-3 rounded-full shrink-0" style={{ backgroundColor: zone.color }} />
+        <h2 className="text-lg font-semibold text-foreground">{zone.name}</h2>
+        {zone.scanner_id && zone.scanner_id !== "pi" && (
+          <span className="text-xs text-muted-foreground/60">({zone.scanner_id})</span>
+        )}
+      </div>
+
+      {/* KPIs */}
+      <div className="grid gap-3 sm:grid-cols-3">
+        <Card className="rounded-lg border-border bg-card">
+          <CardContent className="p-4">
+            <p className={`text-2xl font-semibold ${over ? "text-red-400" : "text-primary"}`}>
+              {stats.active}
+            </p>
+            <p className="mt-1 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+              Active Devices
+            </p>
+            {zone.threshold !== null && (
+              <p className="mt-0.5 text-xs text-muted-foreground/60">
+                limit {zone.threshold}
+              </p>
+            )}
+          </CardContent>
+        </Card>
+        <Card className="rounded-lg border-border bg-card">
+          <CardContent className="p-4">
+            <p className="text-2xl font-semibold text-primary">{stats.last_scan.time}</p>
+            <p className="mt-1 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+              Last Scan
+            </p>
+          </CardContent>
+        </Card>
+        <Card className="rounded-lg border-border bg-card">
+          <CardContent className="p-4">
+            <p className="text-2xl font-semibold text-primary">{stats.last_scan.found}</p>
+            <p className="mt-1 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+              Devices Found
+            </p>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Chart + scan log */}
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Card className="rounded-lg border-border">
+          <CardHeader>
+            <CardTitle className="font-display text-base">Occupancy over time</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {stats.history.length > 0 ? (
+              <ChartContainer config={historyConfig} className="h-[200px] w-full">
+                <AreaChart data={stats.history} margin={{ left: 0, right: 12 }}>
+                  <defs>
+                    <linearGradient id={`grad-${zone.id}`} x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor={zone.color} stopOpacity={0.3} />
+                      <stop offset="95%" stopColor={zone.color} stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
+                  <XAxis
+                    dataKey="time"
+                    tickLine={false}
+                    axisLine={false}
+                    tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 11 }}
+                    interval="preserveStartEnd"
+                  />
+                  <YAxis
+                    tickLine={false}
+                    axisLine={false}
+                    tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 11 }}
+                  />
+                  <ChartTooltip content={<ChartTooltipContent />} />
+                  <Area
+                    type="monotone"
+                    dataKey="count"
+                    stroke={zone.color}
+                    strokeWidth={2}
+                    fill={`url(#grad-${zone.id})`}
+                    dot={false}
+                  />
+                </AreaChart>
+              </ChartContainer>
+            ) : (
+              <p className="py-12 text-center text-sm text-muted-foreground">
+                No history yet.
+              </p>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card className="rounded-lg border-border">
+          <CardHeader>
+            <CardTitle className="font-display text-base">Recent scans</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {stats.scan_log.length > 0 ? (
+              <div className="overflow-x-auto">
+                <table className="w-full">
+                  <thead>
+                    <tr className="border-b border-border">
+                      {["Time", "Found", "Active"].map((h) => (
+                        <th key={h} className="pb-3 text-left text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                          {h}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {stats.scan_log.slice(0, 8).map((row, i) => (
+                      <tr key={i} className="border-b border-border/50 last:border-0">
+                        <td className="py-2 text-sm font-mono text-muted-foreground">{row.time}</td>
+                        <td className="py-2 text-sm text-foreground">{row.found}</td>
+                        <td className="py-2 text-sm font-medium" style={{ color: zone.color }}>{row.active}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="py-12 text-center text-sm text-muted-foreground">No scan data yet.</p>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
 // ── Main view ───────────────────────────────────────────────────────────────
 export function ZonesView() {
   // null | 'map-setup' | 'draw-zones'
@@ -143,8 +302,15 @@ export function ZonesView() {
   const [zoneThreshold, setZoneThreshold] = useState("");
   const zoneNameRef = useRef(null);
 
-  // Inline edit state: { id, threshold, scanner_id }
+  // Inline edit state
   const [editingZone, setEditingZone] = useState(null);
+
+  // Selected zone stats
+  const [selectedZoneId, setSelectedZoneId] = useState(null);
+  const [zoneStats, setZoneStats] = useState(null);
+  const [statsLoading, setStatsLoading] = useState(false);
+
+  const selectedZone = zones.find((z) => z.id === selectedZoneId) ?? null;
 
   const startEdit = (z) => {
     setEditingZone({
@@ -182,7 +348,7 @@ export function ZonesView() {
       .finally(() => setLoading(false));
   }, []);
 
-  // Poll live data for per-zone occupancy
+  // Poll per-zone occupancy counts
   useEffect(() => {
     const fetchOccupancy = () => {
       getLiveData()
@@ -193,6 +359,25 @@ export function ZonesView() {
     const id = setInterval(fetchOccupancy, 7000);
     return () => clearInterval(id);
   }, []);
+
+  // Fetch and poll stats for the selected zone's scanner
+  useEffect(() => {
+    if (!selectedZone) {
+      setZoneStats(null);
+      return;
+    }
+    let cancelled = false;
+    const fetchStats = () => {
+      setStatsLoading(true);
+      getZoneStats(selectedZone.scanner_id)
+        .then((s) => { if (!cancelled) setZoneStats(s); })
+        .catch(() => {})
+        .finally(() => { if (!cancelled) setStatsLoading(false); });
+    };
+    fetchStats();
+    const id = setInterval(fetchStats, 7000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [selectedZoneId, selectedZone?.scanner_id]);
 
   useEffect(() => {
     if (pendingCoords) {
@@ -271,6 +456,7 @@ export function ZonesView() {
   const removeZone = async (id) => {
     await deleteZone(id);
     setZones((prev) => prev.filter((z) => z.id !== id));
+    if (selectedZoneId === id) setSelectedZoneId(null);
   };
 
   const enterConfigure = () => {
@@ -281,6 +467,10 @@ export function ZonesView() {
         zoom: mapConfig.zoom,
       });
     }
+  };
+
+  const toggleSelectZone = (id) => {
+    setSelectedZoneId((prev) => (prev === id ? null : id));
   };
 
   const initialCenter = mapConfig
@@ -298,7 +488,7 @@ export function ZonesView() {
   }
 
   return (
-    <div className="flex flex-col" style={{ height: "calc(100vh - 80px)" }}>
+    <div className="flex flex-col pb-8">
       {/* ── Header ── */}
       <div className="flex items-center justify-between pb-4 shrink-0">
         <div>
@@ -330,8 +520,8 @@ export function ZonesView() {
         )}
       </div>
 
-      {/* ── Body ── */}
-      <div className="flex flex-1 gap-4 min-h-0">
+      {/* ── Map area ── */}
+      <div className="flex gap-4" style={{ height: "56vh" }}>
         {/* Zone list */}
         <div className="w-56 shrink-0 flex flex-col gap-3">
           <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
@@ -351,12 +541,14 @@ export function ZonesView() {
                 const threshold = z.threshold ?? null;
                 const overThreshold = threshold !== null && count !== null && count > threshold;
                 const isEditing = editingZone?.id === z.id;
+                const isSelected = selectedZoneId === z.id;
                 return (
                   <div
                     key={z.id}
-                    className={`flex flex-col gap-1.5 rounded-lg border bg-card px-3 py-2.5 ${
-                      overThreshold ? "border-red-500/60" : "border-border"
-                    }`}
+                    onClick={() => !isEditing && toggleSelectZone(z.id)}
+                    className={`flex flex-col gap-1.5 rounded-lg border bg-card px-3 py-2.5 transition-colors ${
+                      isEditing ? "" : "cursor-pointer hover:bg-muted/40"
+                    } ${isSelected ? "ring-1 ring-primary border-primary/40" : overThreshold ? "border-red-500/60" : "border-border"}`}
                   >
                     <div className="flex items-center gap-2.5">
                       <span
@@ -371,7 +563,7 @@ export function ZonesView() {
                       )}
                       {!isEditing && (
                         <button
-                          onClick={() => startEdit(z)}
+                          onClick={(e) => { e.stopPropagation(); startEdit(z); }}
                           className="text-muted-foreground hover:text-foreground transition-colors shrink-0"
                         >
                           <Pencil size={12} />
@@ -379,7 +571,7 @@ export function ZonesView() {
                       )}
                       {step === "draw-zones" && !isEditing && (
                         <button
-                          onClick={() => removeZone(z.id)}
+                          onClick={(e) => { e.stopPropagation(); removeZone(z.id); }}
                           className="text-muted-foreground hover:text-red-400 transition-colors shrink-0"
                         >
                           <Trash2 size={13} />
@@ -549,6 +741,11 @@ export function ZonesView() {
               Use the toolbar on the left to draw a rectangle zone
             </div>
           )}
+          {step === null && zones.length > 0 && !selectedZoneId && (
+            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-999 rounded-full border border-border/60 bg-black/60 backdrop-blur-sm px-4 py-1.5 text-xs text-muted-foreground pointer-events-none whitespace-nowrap">
+              Click a zone to view its stats
+            </div>
+          )}
 
           {/* Zone naming dialog */}
           {pendingCoords && (
@@ -671,8 +868,8 @@ export function ZonesView() {
                 pathOptions={{
                   color: z.color,
                   fillColor: z.color,
-                  fillOpacity: 0.2,
-                  weight: 2,
+                  fillOpacity: selectedZoneId === z.id ? 0.35 : 0.2,
+                  weight: selectedZoneId === z.id ? 3 : 2,
                   dashArray: step === "draw-zones" ? "4 4" : undefined,
                 }}
               >
@@ -687,6 +884,17 @@ export function ZonesView() {
           </MapContainer>
         </div>
       </div>
+
+      {/* ── Zone stats panel ── */}
+      {selectedZone && (
+        <div className="mt-4">
+          <ZoneStatsPanel
+            zone={selectedZone}
+            stats={zoneStats}
+            loading={statsLoading}
+          />
+        </div>
+      )}
     </div>
   );
 }

@@ -4,7 +4,9 @@ Run on the Pi with: uvicorn api:app --host 0.0.0.0 --port 8000
 """
 import json
 import os
+import random
 import socket
+import threading
 import time
 import urllib.request
 from datetime import datetime
@@ -123,6 +125,61 @@ def check_and_alert(scanner_id: str, active_count: int):
                 send_ntfy_alert(topic, zone["name"], active_count, threshold)
 
 
+# ── Mock scanners (for zones without a real ESP) ──────────────────────────────
+
+_mock_scanners: dict[str, threading.Thread] = {}
+_mock_scanner_stop: dict[str, threading.Event] = {}
+
+
+def _build_mock_pool(scanner_id: str) -> list[dict]:
+    """Deterministic pool of 15 virtual BLE devices seeded by scanner_id."""
+    rng = random.Random(hash(scanner_id) & 0xFFFFFFFF)
+    names = ["Apple", "Samsung", "Google", "Microsoft", "Fitbit", "Garmin", "Sony", "Unknown"]
+    pool = []
+    for _ in range(15):
+        octets = [rng.randint(0, 255) for _ in range(6)]
+        octets[0] &= ~0x03  # clear bits 0-1: unicast + globally administered (stable MAC)
+        mac = ":".join(f"{o:02X}" for o in octets)
+        pool.append({"mac": mac, "name": rng.choice(names)})
+    return pool
+
+
+def _mock_scanner_loop(scanner_id: str, stop_event: threading.Event) -> None:
+    pool = _build_mock_pool(scanner_id)
+    while not stop_event.is_set():
+        # Mirror Pi's current active count ±2-3
+        pi_data = ble_scanner.load_data()
+        settings = load_settings()
+        rssi_min = settings.get("rssi_threshold", -100)
+        pi_active = ble_scanner.get_active_count(pi_data, rssi_min=rssi_min)
+        n = max(0, min(len(pool), pi_active + random.randint(-3, 3)))
+        chosen = random.sample(pool, n)
+        discovered = {
+            dev["mac"]: {"name": dev["name"], "rssi": random.randint(-85, -55)}
+            for dev in chosen
+        }
+        process_external_scan(scanner_id, discovered)
+        stop_event.wait(7)
+
+
+def start_mock_scanner(scanner_id: str) -> None:
+    """Start a background mock data generator for scanner_id if not already running."""
+    if scanner_id in _mock_scanners and _mock_scanners[scanner_id].is_alive():
+        return
+    event = threading.Event()
+    _mock_scanner_stop[scanner_id] = event
+    t = threading.Thread(target=_mock_scanner_loop, args=(scanner_id, event), daemon=True)
+    t.start()
+    _mock_scanners[scanner_id] = t
+    print(f"[Mock] Started mock scanner for '{scanner_id}'", flush=True)
+
+
+def stop_mock_scanner(scanner_id: str) -> None:
+    if scanner_id in _mock_scanner_stop:
+        _mock_scanner_stop[scanner_id].set()
+        print(f"[Mock] Stopped mock scanner for '{scanner_id}'", flush=True)
+
+
 def process_external_scan(scanner_id: str, discovered: dict) -> int:
     """Process a scan report from an external scanner (ESP, second Pi, etc.)."""
     now = time.time()
@@ -197,6 +254,12 @@ app.add_middleware(
 async def on_startup():
     ip = get_local_ip()
     print(f"\n  API URL: http://{ip}:8000\n  Set in client: VITE_API_URL=http://{ip}:8000\n")
+    # Resume mock scanners for any non-pi zones that already exist
+    pi_id = load_settings().get("scanner_id", "pi")
+    for zone in load_zones_data().get("zones", []):
+        sid = zone.get("scanner_id", "pi")
+        if sid != pi_id:
+            start_mock_scanner(sid)
 
 
 @app.get("/api/status")
@@ -264,8 +327,24 @@ def get_live():
             scanner_counts[sid] = ble_scanner.get_active_count(sd, rssi_min=rssi_min)
         zone_occupancy[zone["id"]] = scanner_counts[sid]
 
+    # Combined occupancy: pi always + each unique non-pi scanner that has a zone
+    combined_occupancy = sum(scanner_counts.values())
+
+    zones_summary = [
+        {
+            "id": z["id"],
+            "name": z["name"],
+            "color": z["color"],
+            "scanner_id": z.get("scanner_id", "pi"),
+            "occupancy": zone_occupancy.get(z["id"], 0),
+            "threshold": z.get("threshold"),
+        }
+        for z in zones_data.get("zones", [])
+    ]
+
     return {
         "current_occupancy": active,
+        "combined_occupancy": combined_occupancy,
         "tracked_devices": total_tracked,
         "stable_devices": stable_count,
         "random_devices": random_count,
@@ -289,6 +368,7 @@ def get_live():
         ],
         "devices": devices_list,
         "zone_occupancy": zone_occupancy,
+        "zones_summary": zones_summary,
     }
 
 
@@ -336,6 +416,35 @@ def scanner_report(scanner_id: str, body: ScannerReport):
     active = process_external_scan(scanner_id, body.devices)
     check_and_alert(scanner_id, active)
     return {"ok": True, "scanner_id": scanner_id, "active": active}
+
+
+@app.get("/api/scanner/{scanner_id}/stats")
+def get_scanner_stats(scanner_id: str):
+    settings = load_settings()
+    rssi_min = settings.get("rssi_threshold", -100)
+    pi_id = settings.get("scanner_id", "pi")
+    data = ble_scanner.load_data() if scanner_id == pi_id else load_scanner_data(scanner_id)
+    active = ble_scanner.get_active_count(data, rssi_min=rssi_min)
+    scan_log_raw = data.get("scan_log", [])
+    last_scan_raw = scan_log_raw[-1] if scan_log_raw else {}
+    return {
+        "active": active,
+        "history": [
+            {"time": datetime.fromtimestamp(h["timestamp"]).strftime("%H:%M"), "count": h["count"]}
+            for h in data.get("history", [])
+        ],
+        "scan_log": [
+            {"time": datetime.fromtimestamp(s["timestamp"]).strftime("%H:%M:%S"),
+             "found": s.get("found", 0), "active": s.get("active", 0)}
+            for s in reversed(scan_log_raw)
+        ],
+        "last_scan": {
+            "time": datetime.fromtimestamp(last_scan_raw["timestamp"]).strftime("%H:%M:%S")
+            if last_scan_raw else "—",
+            "found": last_scan_raw.get("found", 0),
+            "active": last_scan_raw.get("active", 0),
+        },
+    }
 
 
 # ── Zones ─────────────────────────────────────────────────────────────────────
@@ -388,6 +497,10 @@ def create_zone(body: ZoneCreate):
     }
     data["zones"].append(zone)
     save_zones_data(data)
+    # Auto-start mock data for non-pi scanner IDs
+    pi_id = load_settings().get("scanner_id", "pi")
+    if body.scanner_id != pi_id:
+        start_mock_scanner(body.scanner_id)
     return zone
 
 
@@ -414,8 +527,14 @@ def update_zone(zone_id: str, body: ZoneUpdate):
 @app.delete("/api/zones/{zone_id}")
 def delete_zone_endpoint(zone_id: str):
     data = load_zones_data()
+    deleted = next((z for z in data["zones"] if z["id"] == zone_id), None)
     data["zones"] = [z for z in data["zones"] if z["id"] != zone_id]
     save_zones_data(data)
+    if deleted:
+        sid = deleted.get("scanner_id", "pi")
+        pi_id = load_settings().get("scanner_id", "pi")
+        if sid != pi_id and not any(z.get("scanner_id") == sid for z in data["zones"]):
+            stop_mock_scanner(sid)
     return {"ok": True}
 
 

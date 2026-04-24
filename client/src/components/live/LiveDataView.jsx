@@ -86,6 +86,7 @@ export function LiveDataView() {
 
   const {
     current_occupancy,
+    combined_occupancy,
     tracked_devices,
     stable_devices,
     random_devices,
@@ -93,7 +94,12 @@ export function LiveDataView() {
     history,
     scan_log,
     devices,
+    zones_summary = [],
   } = data;
+
+  const hasZones = zones_summary.length > 0;
+  // combined_occupancy includes pi + all zone scanners; fall back to pi if no zones
+  const totalOccupancy = hasZones ? combined_occupancy : current_occupancy;
 
   return (
     <div className="space-y-6">
@@ -102,13 +108,17 @@ export function LiveDataView() {
           Occupancy Dashboard
         </h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Unique BLE devices detected (phones, wearables, etc.)
+          Unique BLE devices detected across all zones
         </p>
       </div>
 
       {/* KPIs */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <KPICard label="Current Occupancy" value={current_occupancy} />
+        <KPICard
+          label="Total Occupancy"
+          value={totalOccupancy}
+          sub={hasZones ? `Pi: ${current_occupancy}` : undefined}
+        />
         <KPICard
           label="Tracked Devices"
           value={tracked_devices}
@@ -118,12 +128,52 @@ export function LiveDataView() {
         <KPICard label="Devices in Last Scan" value={last_scan.found} />
       </div>
 
+      {/* Zone Breakdown */}
+      {hasZones && (
+        <Card className="rounded-lg border-border">
+          <CardHeader>
+            <CardTitle className="font-display text-lg">Zone Breakdown</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {zones_summary.map((z) => {
+                const over = z.threshold !== null && z.occupancy > z.threshold;
+                return (
+                  <div
+                    key={z.id}
+                    className={`flex items-center justify-between rounded-lg border px-4 py-3 ${
+                      over ? "border-red-500/50 bg-red-500/5" : "border-border bg-muted/30"
+                    }`}
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <span
+                        className="h-2.5 w-2.5 rounded-full shrink-0"
+                        style={{ backgroundColor: z.color }}
+                      />
+                      <span className="truncate text-sm text-foreground">{z.name}</span>
+                    </div>
+                    <div className="shrink-0 text-right ml-3">
+                      <span className={`text-lg font-semibold ${over ? "text-red-400" : "text-primary"}`}>
+                        {z.occupancy}
+                      </span>
+                      {z.threshold !== null && (
+                        <span className="ml-1 text-xs text-muted-foreground">/ {z.threshold}</span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Charts row */}
       <div className="grid gap-6 lg:grid-cols-2">
         {/* Occupancy over time */}
         <Card className="rounded-lg border-border">
           <CardHeader>
-            <CardTitle className="font-display text-lg">Occupancy over time</CardTitle>
+            <CardTitle className="font-display text-lg">Occupancy over time (Pi)</CardTitle>
           </CardHeader>
           <CardContent>
             {history.length > 0 ? (
@@ -170,7 +220,7 @@ export function LiveDataView() {
         {/* Recent scans */}
         <Card className="rounded-lg border-border">
           <CardHeader>
-            <CardTitle className="font-display text-lg">Recent scans</CardTitle>
+            <CardTitle className="font-display text-lg">Recent scans (Pi)</CardTitle>
           </CardHeader>
           <CardContent>
             {scan_log.length > 0 ? (
